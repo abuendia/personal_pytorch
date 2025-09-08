@@ -236,6 +236,67 @@ def dna_to_one_hot(sequences: List[str]) -> np.ndarray:
     return one_hot
 
 
+class MultiSamplePersonalizedGenome:
+    """
+    A class to handle multiple personalized genomes from the same VCF file.
+    """
+    
+    def __init__(self, reference_genome: str, vcf_file: str, sample_ids: List[str]):
+        """
+        Initialize multi-sample personalized genome.
+        
+        Args:
+            reference_genome: Path to reference genome fasta file
+            vcf_file: Path to VCF/BCF file containing variants
+            sample_ids: List of sample IDs to extract genotypes from VCF
+        """
+        self.reference_genome_path = reference_genome
+        self.vcf_file = vcf_file
+        self.sample_ids = sample_ids
+        self.personalized_genomes = {}
+        
+        # Create PersonalizedGenome instance for each sample
+        for sample_id in sample_ids:
+            self.personalized_genomes[sample_id] = PersonalizedGenome(
+                reference_genome, vcf_file, sample_id
+            )
+    
+    def get_sequence(self, sample_id: str, chrom: str, start: int, end: int) -> str:
+        """
+        Get personalized sequence for a specific sample and genomic region.
+        """
+        return self.personalized_genomes[sample_id].get_sequence(chrom, start, end)
+    
+    def get_sequence_with_haplotypes(self, sample_id: str, chrom: str, start: int, end: int) -> Tuple[str, str]:
+        """
+        Get personalized sequence for a specific sample and genomic region, returning both haplotypes.
+        """
+        return self.personalized_genomes[sample_id].get_sequence_with_haplotypes(chrom, start, end)
+    
+    def get_all_samples_sequences(self, chrom: str, start: int, end: int) -> List[Tuple[str, str]]:
+        """
+        Get personalized sequences for all samples for a genomic region.
+        
+        Returns:
+            List of (haplotype1, haplotype2) tuples for each sample
+        """
+        return [
+            self.get_sequence_with_haplotypes(sample_id, chrom, start, end)
+            for sample_id in self.sample_ids
+        ]
+    
+    def close(self):
+        """Close all PersonalizedGenome instances."""
+        for genome in self.personalized_genomes.values():
+            genome.close()
+    
+    def __enter__(self):
+        return self
+    
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+
 def get_personalized_sequences(peaks_df: pd.DataFrame, personalized_genome: PersonalizedGenome, 
                              width: int) -> np.ndarray:
     """
@@ -270,3 +331,46 @@ def get_personalized_sequences(peaks_df: pd.DataFrame, personalized_genome: Pers
     vals = np.add(first_vals, second_vals) / 2
     
     return vals
+
+
+def get_multi_sample_personalized_sequences(peaks_df: pd.DataFrame, 
+                                          multi_genome: MultiSamplePersonalizedGenome, 
+                                          width: int) -> Dict[str, np.ndarray]:
+    """
+    Get personalized sequences for peak regions from multiple samples, averaging haplotypes.
+    
+    Args:
+        peaks_df: DataFrame with chr, start, summit columns
+        multi_genome: MultiSamplePersonalizedGenome instance
+        width: Width of sequence to extract
+    
+    Returns:
+        Dictionary mapping sample_id to N x L x 4 numpy arrays of averaged one-hot encodings
+    """
+    sample_sequences = {}
+    
+    for sample_id in multi_genome.sample_ids:
+        first_vals = []
+        second_vals = []
+        
+        for p_i, r in tqdm(peaks_df.iterrows(), total=len(peaks_df), 
+                          desc=f"Processing personalized sequences for {sample_id}"):
+            chromo = r['chr']
+            summit = r['start'] + r['summit']
+            start = summit - width // 2
+            end = summit + width // 2
+            
+            # Get both haplotypes for this sample
+            first_hap, second_hap = multi_genome.get_sequence_with_haplotypes(sample_id, chromo, start, end)
+            
+            first_vals.append(first_hap.upper())
+            second_vals.append(second_hap.upper())
+        
+        # Convert to one-hot and average
+        first_vals = dna_to_one_hot(first_vals)
+        second_vals = dna_to_one_hot(second_vals)
+        vals = np.add(first_vals, second_vals) / 2
+        
+        sample_sequences[sample_id] = vals
+    
+    return sample_sequences

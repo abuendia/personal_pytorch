@@ -90,6 +90,11 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
                             help='Gradient clipping value')
     parser.add_argument('--force', action='store_true', default=False,
                             help='Force training even if model already exists')
+    parser.add_argument('--sample_ids', type=str, nargs='+', default=None,
+                            help='Multiple sample IDs for multi-sample training')
+    parser.add_argument('--training_mode', type=str, default='standard',
+                            choices=['standard', 'multi_sample_sequential', 'multi_sample_extended_loss'],
+                            help='Training mode: standard, multi_sample_sequential, or multi_sample_extended_loss')
     
     # Add model-specific arguments
     ChromBPNetConfig.add_argparse_args(parser)
@@ -180,13 +185,16 @@ def train(args):
     log.info(f'n_filters: {args.n_filters}')
     log.info(f'batch_size: {data_config.batch_size}')
     log.info(f'precision: {args.precision}')
+    log.info(f'training_mode: {data_config.training_mode}')
+    log.info(f'sample_ids: {data_config.sample_ids}')
 
     datamodule = DataModule(data_config)
 
     args.alpha = datamodule.median_count / 10
     log.info(f'alpha: {args.alpha}')
 
-
+    # Pass training_mode to model creation
+    args.training_mode = data_config.training_mode
     model = create_model_wrapper(args)
     if args.adjust_bias:
         adjust_bias_model_logcounts(model.model.bias, datamodule.negative_dataloader())
@@ -236,13 +244,16 @@ def finetune(args):
     log.info(f'n_filters: {args.n_filters}')
     log.info(f'batch_size: {data_config.batch_size}')
     log.info(f'precision: {args.precision}')
+    log.info(f'training_mode: {data_config.training_mode}')
+    log.info(f'sample_ids: {data_config.sample_ids}')
 
     datamodule = DataModule(data_config)
 
     args.alpha = datamodule.median_count / 10
     log.info(f'alpha: {args.alpha}')
 
-
+    # Pass training_mode to model creation
+    args.training_mode = data_config.training_mode
     # model = create_model_wrapper(args)
     model = load_model(args)
     if args.adjust_bias:

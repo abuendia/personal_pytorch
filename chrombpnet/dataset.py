@@ -54,9 +54,14 @@ class DataModule(L.LightningDataModule):
         super().__init__()
         self.config = config
 
-        # Set dataset class based on data type
+        # Set dataset class based on data type and training mode
         if self.config.data_type == 'profile':
-            self.dataset_class = ChromBPNetDataset
+            if self.config.training_mode == 'multi_sample_sequential':
+                self.dataset_class = MultiSampleSequentialDataset
+            elif self.config.training_mode == 'multi_sample_extended_loss':
+                self.dataset_class = MultiSampleExtendedLossDataset
+            else:
+                self.dataset_class = ChromBPNetDataset
         else:
             raise ValueError(f'Invalid data type: {self.config.data_type}')
 
@@ -128,6 +133,8 @@ class DataModule(L.LightningDataModule):
                 shuffle_at_epoch_start=False, #shuffle_at_epoch_start
                 vcf_file=config.vcf_file,
                 sample_id=config.sample_id,
+                sample_ids=config.sample_ids,
+                training_mode=config.training_mode,
             )
             self.val_dataset = self.dataset_class(
                 peak_regions=val_peaks,
@@ -143,6 +150,8 @@ class DataModule(L.LightningDataModule):
                 shuffle_at_epoch_start=False,
                 vcf_file=config.vcf_file,
                 sample_id=config.sample_id,
+                sample_ids=config.sample_ids,
+                training_mode=config.training_mode,
             )
         elif stage == 'test':
             test_peaks, test_nonpeaks = split_peak_and_nonpeak(self.test_data)
@@ -160,6 +169,8 @@ class DataModule(L.LightningDataModule):
                 shuffle_at_epoch_start=False,
                 vcf_file=config.vcf_file,
                 sample_id=config.sample_id,
+                sample_ids=config.sample_ids,
+                training_mode=config.training_mode,
             )
 
         print(f'Data setup complete in {time() - t0:.2f} seconds')
@@ -176,7 +187,19 @@ class DataModule(L.LightningDataModule):
 
 
     def train_dataloader(self):
-        self.train_dataset.crop_revcomp_data()
+        # Handle sequential training sample switching
+        if isinstance(self.train_dataset, MultiSampleSequentialDataset):
+            # For sequential training, set up the dataset for the next sample
+            if hasattr(self, '_epoch_count'):
+                self._epoch_count += 1
+            else:
+                self._epoch_count = 0
+            
+            if self.config.sample_ids:
+                sample_idx = self._epoch_count % len(self.config.sample_ids)
+                self.train_dataset.set_current_sample(sample_idx)
+        else:
+            self.train_dataset.crop_revcomp_data()
         
         return torch.utils.data.DataLoader(
             self.train_dataset, 
@@ -220,6 +243,8 @@ class DataModule(L.LightningDataModule):
             shuffle_at_epoch_start=False,
             vcf_file=self.config.vcf_file,
             sample_id=self.config.sample_id,
+            sample_ids=self.config.sample_ids,
+            training_mode=self.config.training_mode,
         )
         return torch.utils.data.DataLoader(
             self.negative_dataset, 
@@ -268,6 +293,8 @@ class DataModule(L.LightningDataModule):
             debug=self.config.debug,
             vcf_file=self.config.vcf_file,
             sample_id=self.config.sample_id,
+            sample_ids=self.config.sample_ids,
+            training_mode=self.config.training_mode,
         )
         return dataset
 
@@ -417,6 +444,8 @@ class ChromBPNetDataset(torch.utils.data.Dataset):
             debug=False,
             vcf_file=None,
             sample_id=None,
+            sample_ids=None,
+            training_mode='standard',
             **kwargs
     ):
         """Initialize the generator.
@@ -442,10 +471,25 @@ class ChromBPNetDataset(torch.utils.data.Dataset):
 
  
         # Load data
-        peak_seqs, peak_cts, peak_coords, nonpeak_seqs, nonpeak_cts, nonpeak_coords = load_data(
+        loaded_data = load_data(
             peak_regions, nonpeak_regions, genome_fasta, cts_bw_file, inputlen, outputlen, max_jitter,
-            vcf_file=vcf_file, sample_id=sample_id
+            vcf_file=vcf_file, sample_id=sample_id, sample_ids=sample_ids, training_mode=training_mode
         )
+        
+        # Handle multi-sample or single-sample data loading
+        if isinstance(loaded_data, dict) and 'training_mode' in loaded_data:
+            # Multi-sample case
+            self.multi_sample_data = loaded_data
+            peak_seqs = loaded_data['train_peaks_seqs']
+            peak_cts = loaded_data['train_peaks_cts'] 
+            peak_coords = loaded_data['train_peaks_coords']
+            nonpeak_seqs = loaded_data['train_nonpeaks_seqs']
+            nonpeak_cts = loaded_data['train_nonpeaks_cts']
+            nonpeak_coords = loaded_data['train_nonpeaks_coords']
+        else:
+            # Single-sample case
+            self.multi_sample_data = None
+            peak_seqs, peak_cts, peak_coords, nonpeak_seqs, nonpeak_cts, nonpeak_coords = loaded_data
 
         # Store data
         self.peak_seqs, self.nonpeak_seqs = peak_seqs, nonpeak_seqs
@@ -462,6 +506,8 @@ class ChromBPNetDataset(torch.utils.data.Dataset):
         self.max_jitter = max_jitter
         self.genome_fasta = genome_fasta
         self.cts_bw_file = cts_bw_file
+        self.training_mode = training_mode
+        self.sample_ids = sample_ids
 
         if nonpeak_regions is not None:
             self.regions = pd.concat([peak_regions, nonpeak_regions], ignore_index=True)
@@ -505,8 +551,126 @@ class ChromBPNetDataset(torch.utils.data.Dataset):
                 - onehot_seq: One-hot encoded sequence
                 - profile: Profile data
         """
-        return {
+        if self.training_mode == 'multi_sample_sequential':
+            # For sequential training, we need to return data for specific sample in this epoch
+            # This will be handled by the MultiSampleSequentialDataset
+            return {
+                'onehot_seq': self.cur_seqs[idx].astype(np.float32).transpose(),
+                'profile': self.cur_cts[idx].astype(np.float32),
+            }
+        elif self.training_mode == 'multi_sample_extended_loss':
+            # For extended loss training, we return all samples for this region
+            return {
+                'onehot_seq': self.cur_seqs[idx].astype(np.float32).transpose(),
+                'profile': self.cur_cts[idx].astype(np.float32),
+                'all_samples_seq': getattr(self, 'cur_all_samples_seqs', [self.cur_seqs[idx]])[idx],
+                'all_samples_profile': getattr(self, 'cur_all_samples_cts', [self.cur_cts[idx]])[idx],
+            }
+        else:
+            return {
+                'onehot_seq': self.cur_seqs[idx].astype(np.float32).transpose(),
+                'profile': self.cur_cts[idx].astype(np.float32),
+            }
+
+
+class MultiSampleSequentialDataset(ChromBPNetDataset):
+    """
+    Dataset for multi-sample sequential training where each epoch trains on one sample.
+    """
+    
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.current_sample_idx = 0
+        self.current_epoch = 0
+        
+    def set_current_sample(self, sample_idx):
+        """Set the current sample to use for this epoch."""
+        self.current_sample_idx = sample_idx
+        # Set the data for the current sample
+        if self.multi_sample_data:
+            sample_id = self.sample_ids[sample_idx]
+            
+            if isinstance(self.multi_sample_data['train_peaks_seqs'], dict):
+                self.peak_seqs = self.multi_sample_data['train_peaks_seqs'][sample_id]
+            if isinstance(self.multi_sample_data['train_nonpeaks_seqs'], dict):
+                self.nonpeak_seqs = self.multi_sample_data['train_nonpeaks_seqs'][sample_id]
+                
+            # Re-apply cropping and augmentation
+            self.crop_revcomp_data()
+    
+    def on_epoch_end(self):
+        """Called at the end of each epoch to switch to next sample."""
+        if self.sample_ids:
+            self.current_sample_idx = (self.current_sample_idx + 1) % len(self.sample_ids)
+            self.set_current_sample(self.current_sample_idx)
+
+
+class MultiSampleExtendedLossDataset(ChromBPNetDataset):
+    """
+    Dataset for multi-sample training with extended loss that averages across samples.
+    """
+    
+    def crop_revcomp_data(self):
+        """Apply random cropping and reverse complement augmentation to the multi-sample data."""
+        if self.multi_sample_data and isinstance(self.multi_sample_data['train_peaks_seqs'], dict):
+            # For extended loss, we need to prepare data from all samples
+            all_samples_seqs = []
+            all_samples_cts = []
+            
+            sample_ids = self.sample_ids or []
+            
+            for sample_id in sample_ids:
+                # Get data for this sample
+                peak_seqs = self.multi_sample_data['train_peaks_seqs'].get(sample_id, self.peak_seqs)
+                nonpeak_seqs = self.multi_sample_data['train_nonpeaks_seqs'].get(sample_id, self.nonpeak_seqs)
+                
+                # Apply cropping and augmentation for this sample
+                sample_seqs, sample_cts, sample_coords = crop_revcomp_data(
+                    peak_seqs, self.peak_cts, self.peak_coords,
+                    nonpeak_seqs, self.nonpeak_cts, self.nonpeak_coords,
+                    self.inputlen, self.outputlen, self.add_revcomp, 
+                    self.negative_sampling_ratio, self.shuffle_at_epoch_start
+                )
+                
+                all_samples_seqs.append(sample_seqs)
+                all_samples_cts.append(sample_cts)
+            
+            # Store all samples data
+            self.cur_all_samples_seqs = all_samples_seqs
+            self.cur_all_samples_cts = all_samples_cts
+            
+            # Use first sample as the primary data (for compatibility)
+            if all_samples_seqs:
+                self.cur_seqs = all_samples_seqs[0]
+                self.cur_cts = all_samples_cts[0]
+                self.cur_coords = self.peak_coords  # Use original coords
+        else:
+            # Fall back to standard cropping
+            super().crop_revcomp_data()
+    
+    def __getitem__(self, idx):
+        """Get a sample that includes data from all samples for extended loss calculation."""
+        result = {
             'onehot_seq': self.cur_seqs[idx].astype(np.float32).transpose(),
             'profile': self.cur_cts[idx].astype(np.float32),
         }
+        
+        # Add all samples data for extended loss
+        if hasattr(self, 'cur_all_samples_seqs') and self.cur_all_samples_seqs:
+            all_samples_seqs = []
+            all_samples_profiles = []
+            
+            for sample_seqs, sample_cts in zip(self.cur_all_samples_seqs, self.cur_all_samples_cts):
+                if idx < len(sample_seqs) and idx < len(sample_cts):
+                    all_samples_seqs.append(sample_seqs[idx].astype(np.float32).transpose())
+                    all_samples_profiles.append(sample_cts[idx].astype(np.float32))
+            
+            result['all_samples_seqs'] = np.stack(all_samples_seqs) if all_samples_seqs else result['onehot_seq'][np.newaxis]
+            result['all_samples_profiles'] = np.stack(all_samples_profiles) if all_samples_profiles else result['profile'][np.newaxis]
+        else:
+            # Fallback if no multi-sample data
+            result['all_samples_seqs'] = result['onehot_seq'][np.newaxis]
+            result['all_samples_profiles'] = result['profile'][np.newaxis]
+            
+        return result
 

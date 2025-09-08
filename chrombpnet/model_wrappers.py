@@ -87,6 +87,45 @@ def multinomial_nll(logits, true_counts):
     return nll
 
 
+def multinomial_nll_multi_sample_extended(logits_all_samples, true_counts_all_samples):
+    """Compute the multinomial negative log-likelihood across multiple samples, averaging per base and across individuals.
+    
+    Args:
+      true_counts_all_samples: Tensor of observed counts (batch_size, num_samples, num_classes) (integer counts)
+      logits_all_samples: Tensor of predicted logits (batch_size, num_samples, num_classes)
+    
+    Returns:
+      Mean negative log-likelihood averaged across bases and individuals.
+    """
+    batch_size, num_samples, num_classes = logits_all_samples.shape
+    
+    # Ensure true_counts is float tensor
+    true_counts_all_samples = true_counts_all_samples.to(torch.float)
+    
+    # Compute total counts per example per sample
+    counts_per_example_sample = true_counts_all_samples.sum(dim=-1, keepdim=True)  # (batch_size, num_samples, 1)
+    
+    # Convert logits to log probabilities (Softmax + Log) 
+    log_probs_all_samples = F.log_softmax(logits_all_samples, dim=-1)  # (batch_size, num_samples, num_classes)
+    
+    # Compute log-probability of the observed counts for each sample
+    log_likelihood_all_samples = (true_counts_all_samples * log_probs_all_samples).sum(dim=-1)  # (batch_size, num_samples)
+    
+    # Compute multinomial coefficient (log factorial term) for each sample
+    log_factorial_counts_all_samples = (torch.lgamma(counts_per_example_sample + 1) - 
+                                        torch.lgamma(true_counts_all_samples + 1).sum(dim=-1, keepdim=True))
+    log_factorial_counts_all_samples = log_factorial_counts_all_samples.squeeze(-1)  # (batch_size, num_samples)
+    
+    # Compute final NLL for each sample
+    nll_all_samples = -(log_factorial_counts_all_samples + log_likelihood_all_samples)  # (batch_size, num_samples)
+    
+    # Average across individuals (samples) and then across bases (batch)
+    nll_averaged_across_individuals = nll_all_samples.mean(dim=-1)  # (batch_size,) - average across samples
+    nll_final = nll_averaged_across_individuals.mean()  # scalar - average across batch (bases)
+    
+    return nll_final
+
+
 def pearson_corr(x: torch.Tensor, y: torch.Tensor, dim: int = -1) -> torch.Tensor:
     """
     Compute the Pearson correlation coefficient along a given dimension for multi-dimensional tensors.
@@ -632,6 +671,154 @@ class ChromBPNetWrapper(BPNetWrapper):
         self.model = ChromBPNet(config)
 
 
+class MultiSampleExtendedLossBPNetWrapper(BPNetWrapper):
+    """Wrapper for BPNet model with multi-sample extended loss functionality."""
+    
+    def _step(self, batch, batch_idx, mode='train'):
+        # Check if this is multi-sample extended loss mode
+        if 'all_samples_seqs' in batch and 'all_samples_profiles' in batch:
+            return self._multi_sample_extended_loss_step(batch, batch_idx, mode)
+        else:
+            # Fall back to standard step
+            return super()._step(batch, batch_idx, mode)
+    
+    def _multi_sample_extended_loss_step(self, batch, batch_idx, mode='train'):
+        all_samples_seqs = batch['all_samples_seqs']  # (batch_size, num_samples, 4, seq_length)
+        all_samples_profiles = batch['all_samples_profiles']  # (batch_size, num_samples, seq_length)
+        
+        batch_size, num_samples = all_samples_seqs.shape[:2]
+        
+        # Reshape to process all samples at once
+        seqs_reshaped = all_samples_seqs.view(batch_size * num_samples, *all_samples_seqs.shape[2:])
+        profiles_reshaped = all_samples_profiles.view(batch_size * num_samples, *all_samples_profiles.shape[2:])
+        
+        # Forward pass for all samples
+        y_profile_all, y_count_all = self(seqs_reshaped)
+        
+        # Reshape back to separate samples
+        y_profile_all = y_profile_all.view(batch_size, num_samples, -1)  # (batch_size, num_samples, seq_length)
+        y_count_all = y_count_all.view(batch_size, num_samples, -1)  # (batch_size, num_samples, 1)
+        y_count_all = y_count_all.squeeze(-1)  # (batch_size, num_samples)
+        
+        # Compute true counts for all samples
+        true_counts_all = torch.log1p(profiles_reshaped.sum(dim=-1)).view(batch_size, num_samples)
+        
+        if mode == 'predict':
+            return {
+                'pred_count': _to_numpy(y_count_all),
+                'true_count': _to_numpy(true_counts_all),
+                'pred_profile': _to_numpy(y_profile_all),
+                'true_profile': _to_numpy(all_samples_profiles),
+            }
+
+        # Store metrics (use average across samples for consistency)
+        y_count_avg = y_count_all.mean(dim=1)
+        true_counts_avg = true_counts_all.mean(dim=1)
+        self.metrics[mode]['preds'].append(y_count_avg)
+        self.metrics[mode]['targets'].append(true_counts_avg)
+        
+        with torch.no_grad():
+            # Compute average profile pearson across samples
+            profile_pearsons = []
+            for i in range(num_samples):
+                profile_pearson = pearson_corr(y_profile_all[:, i].softmax(-1), all_samples_profiles[:, i])
+                profile_pearsons.append(profile_pearson)
+            avg_profile_pearson = torch.stack(profile_pearsons).mean()
+            self.log_dict({f"{mode}_profile_pearson": avg_profile_pearson}, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+
+        # Use extended multinomial loss
+        profile_loss = multinomial_nll_multi_sample_extended(y_profile_all, all_samples_profiles)
+        
+        # Count loss averaged across samples
+        count_loss = F.mse_loss(y_count_all, true_counts_all)
+        
+        loss = self.beta * profile_loss + self.alpha * count_loss
+
+        dict_show = {
+            f'{mode}_loss': loss, 
+            f'{mode}_profile_loss': profile_loss,
+            f'{mode}_count_loss': count_loss,
+        }
+
+        self.log_dict(dict_show, on_step=False, on_epoch=True, prog_bar=False, logger=True, sync_dist=True)
+
+        return loss
+
+
+class MultiSampleExtendedLossChromBPNetWrapper(ChromBPNetWrapper):
+    """ChromBPNet wrapper with multi-sample extended loss functionality."""
+    
+    def _step(self, batch, batch_idx, mode='train'):
+        # Check if this is multi-sample extended loss mode
+        if 'all_samples_seqs' in batch and 'all_samples_profiles' in batch:
+            return self._multi_sample_extended_loss_step(batch, batch_idx, mode)
+        else:
+            # Fall back to standard step
+            return super()._step(batch, batch_idx, mode)
+    
+    def _multi_sample_extended_loss_step(self, batch, batch_idx, mode='train'):
+        all_samples_seqs = batch['all_samples_seqs']  # (batch_size, num_samples, 4, seq_length)
+        all_samples_profiles = batch['all_samples_profiles']  # (batch_size, num_samples, seq_length)
+        
+        batch_size, num_samples = all_samples_seqs.shape[:2]
+        
+        # Reshape to process all samples at once
+        seqs_reshaped = all_samples_seqs.view(batch_size * num_samples, *all_samples_seqs.shape[2:])
+        profiles_reshaped = all_samples_profiles.view(batch_size * num_samples, *all_samples_profiles.shape[2:])
+        
+        # Forward pass for all samples
+        y_profile_all, y_count_all = self(seqs_reshaped)
+        
+        # Reshape back to separate samples
+        y_profile_all = y_profile_all.view(batch_size, num_samples, -1)  # (batch_size, num_samples, seq_length)
+        y_count_all = y_count_all.view(batch_size, num_samples, -1)  # (batch_size, num_samples, 1)
+        y_count_all = y_count_all.squeeze(-1)  # (batch_size, num_samples)
+        
+        # Compute true counts for all samples
+        true_counts_all = torch.log1p(profiles_reshaped.sum(dim=-1)).view(batch_size, num_samples)
+        
+        if mode == 'predict':
+            return {
+                'pred_count': _to_numpy(y_count_all),
+                'true_count': _to_numpy(true_counts_all),
+                'pred_profile': _to_numpy(y_profile_all),
+                'true_profile': _to_numpy(all_samples_profiles),
+            }
+
+        # Store metrics (use average across samples for consistency)
+        y_count_avg = y_count_all.mean(dim=1)
+        true_counts_avg = true_counts_all.mean(dim=1)
+        self.metrics[mode]['preds'].append(y_count_avg)
+        self.metrics[mode]['targets'].append(true_counts_avg)
+        
+        with torch.no_grad():
+            # Compute average profile pearson across samples
+            profile_pearsons = []
+            for i in range(num_samples):
+                profile_pearson = pearson_corr(y_profile_all[:, i].softmax(-1), all_samples_profiles[:, i])
+                profile_pearsons.append(profile_pearson)
+            avg_profile_pearson = torch.stack(profile_pearsons).mean()
+            self.log_dict({f"{mode}_profile_pearson": avg_profile_pearson}, on_step=False, on_epoch=True, prog_bar=True, logger=True, sync_dist=True)
+
+        # Use extended multinomial loss
+        profile_loss = multinomial_nll_multi_sample_extended(y_profile_all, all_samples_profiles)
+        
+        # Count loss averaged across samples
+        count_loss = F.mse_loss(y_count_all, true_counts_all)
+        
+        loss = self.beta * profile_loss + self.alpha * count_loss
+
+        dict_show = {
+            f'{mode}_loss': loss, 
+            f'{mode}_profile_loss': profile_loss,
+            f'{mode}_count_loss': count_loss,
+        }
+
+        self.log_dict(dict_show, on_step=False, on_epoch=True, prog_bar=False, logger=True, sync_dist=True)
+
+        return loss
+
+
 def create_model_wrapper(
     args,
     **kwargs
@@ -650,10 +837,19 @@ def create_model_wrapper(
         ValueError: If model_type is not recognized
     """
     model_type = args.model_type.lower()
+    training_mode = getattr(args, 'training_mode', 'standard')
+    
     if model_type == 'bpnet':
-        return BPNetWrapper(args)
+        if training_mode == 'multi_sample_extended_loss':
+            return MultiSampleExtendedLossBPNetWrapper(args)
+        else:
+            return BPNetWrapper(args)
     elif model_type == 'chrombpnet':
-        model_wrapper = ChromBPNetWrapper(args)
+        if training_mode == 'multi_sample_extended_loss':
+            model_wrapper = MultiSampleExtendedLossChromBPNetWrapper(args)
+        else:
+            model_wrapper = ChromBPNetWrapper(args)
+            
         if args.bias_scaled:
             model_wrapper.model.bias = model_wrapper.init_bias(args.bias_scaled)
         if args.chrombpnet_wo_bias:

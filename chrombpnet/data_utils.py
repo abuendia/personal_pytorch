@@ -263,10 +263,23 @@ def get_seq(peaks_df, genome, width):
         start = r['start'] + r['summit'] - width//2
         end = r['start'] + r['summit'] + width//2
         
-        # Check if genome is a PersonalizedGenome instance
-        if hasattr(genome, 'get_sequence_with_haplotypes'):
+        # Check if genome is a MultiSamplePersonalizedGenome instance
+        if hasattr(genome, 'sample_ids'):
+            # Multi-sample personalized genome - return dict of sequences for each sample
+            from .personalized_genome import MultiSamplePersonalizedGenome
+            if not hasattr(get_seq, '_multi_sample_dict'):
+                get_seq._multi_sample_dict = {sample_id: [] for sample_id in genome.sample_ids}
+            
+            for sample_id in genome.sample_ids:
+                first_hap, second_hap = genome.get_sequence_with_haplotypes(sample_id, r['chr'], start, end)
+                # Average the haplotypes by converting to one-hot and averaging
+                first_onehot = dna_to_one_hot([first_hap])
+                second_onehot = dna_to_one_hot([second_hap])
+                sequence_onehot = (first_onehot + second_onehot) / 2
+                get_seq._multi_sample_dict[sample_id].append(sequence_onehot[0])
+        # Check if genome is a single PersonalizedGenome instance
+        elif hasattr(genome, 'get_sequence_with_haplotypes'):
             # Use personalized genome with haplotype averaging
-            from .personalized_genome import get_personalized_sequences
             # For single region, we need to handle it differently
             first_hap, second_hap = genome.get_sequence_with_haplotypes(r['chr'], start, end)
             # Average the haplotypes by converting to one-hot and averaging
@@ -279,6 +292,15 @@ def get_seq(peaks_df, genome, width):
             sequence = str(genome[r['chr']][start:end])
             vals.append(sequence)
 
+    # Handle multi-sample case
+    if hasattr(get_seq, '_multi_sample_dict'):
+        multi_sample_result = {}
+        for sample_id, sample_vals in get_seq._multi_sample_dict.items():
+            multi_sample_result[sample_id] = np.array(sample_vals)
+        # Clean up the temporary attribute
+        delattr(get_seq, '_multi_sample_dict')
+        return multi_sample_result
+    
     # If we have one-hot encoded sequences, return them directly
     if vals and hasattr(vals[0], 'shape') and len(vals[0].shape) > 1:
         return np.array(vals)
@@ -318,9 +340,15 @@ def get_seq_cts_coords(peaks_df, genome, bw, input_width, output_width, peaks_bo
     seq = get_seq(peaks_df, genome, input_width)
     cts = get_cts(peaks_df, bw, output_width)
     coords = get_coords(peaks_df, peaks_bool)
-    return seq, cts, coords
+    
+    # Handle multi-sample case
+    if isinstance(seq, dict):
+        # Return dict for multi-sample
+        return seq, cts, coords
+    else:
+        return seq, cts, coords
 
-def load_data(bed_regions, nonpeak_regions, genome_fasta, cts_bw_file, inputlen, outputlen, max_jitter, vcf_file=None, sample_id=None):
+def load_data(bed_regions, nonpeak_regions, genome_fasta, cts_bw_file, inputlen, outputlen, max_jitter, vcf_file=None, sample_id=None, sample_ids=None, training_mode='standard'):
     """
     Load sequences and corresponding base resolution counts for training, 
     validation regions in peaks and nonpeaks (2 x 2 x 2 = 8 matrices).
@@ -336,9 +364,15 @@ def load_data(bed_regions, nonpeak_regions, genome_fasta, cts_bw_file, inputlen,
     cts_bw = pyBigWig.open(cts_bw_file)
     
     # Use personalized genome if VCF file is provided
-    if vcf_file and sample_id:
-        from .personalized_genome import PersonalizedGenome
-        genome = PersonalizedGenome(genome_fasta, vcf_file, sample_id)
+    if vcf_file and (sample_id or sample_ids):
+        if training_mode in ['multi_sample_sequential', 'multi_sample_extended_loss'] and sample_ids:
+            from .personalized_genome import MultiSamplePersonalizedGenome
+            genome = MultiSamplePersonalizedGenome(genome_fasta, vcf_file, sample_ids)
+        elif sample_id:
+            from .personalized_genome import PersonalizedGenome
+            genome = PersonalizedGenome(genome_fasta, vcf_file, sample_id)
+        else:
+            genome = pyfaidx.Fasta(genome_fasta)
     else:
         genome = pyfaidx.Fasta(genome_fasta)
 
@@ -369,13 +403,25 @@ def load_data(bed_regions, nonpeak_regions, genome_fasta, cts_bw_file, inputlen,
                                             outputlen,
                                             peaks_bool=0)
 
-
-
     cts_bw.close()
     genome.close()
 
-    return (train_peaks_seqs, train_peaks_cts, train_peaks_coords,
-            train_nonpeaks_seqs, train_nonpeaks_cts, train_nonpeaks_coords)
+    # Handle multi-sample case
+    if training_mode in ['multi_sample_sequential', 'multi_sample_extended_loss']:
+        # Return a structure that indicates multi-sample data
+        return {
+            'training_mode': training_mode,
+            'sample_ids': sample_ids,
+            'train_peaks_seqs': train_peaks_seqs,
+            'train_peaks_cts': train_peaks_cts, 
+            'train_peaks_coords': train_peaks_coords,
+            'train_nonpeaks_seqs': train_nonpeaks_seqs,
+            'train_nonpeaks_cts': train_nonpeaks_cts,
+            'train_nonpeaks_coords': train_nonpeaks_coords
+        }
+    else:
+        return (train_peaks_seqs, train_peaks_cts, train_peaks_coords,
+                train_nonpeaks_seqs, train_nonpeaks_cts, train_nonpeaks_coords)
 
 
 def write_bigwig(data, regions, gs, bw_out, debug_chr=None, use_tqdm=False, outstats_file=None):

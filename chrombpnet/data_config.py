@@ -53,6 +53,8 @@ class DataConfig:
             debug: bool = False,
             vcf_file: Optional[str] = None,
             sample_id: Optional[str] = None,
+            sample_ids: Optional[List[str]] = None,
+            training_mode: str = 'standard',
             **kwargs,
         ):
 
@@ -83,6 +85,8 @@ class DataConfig:
             self.debug = debug
             self.vcf_file = vcf_file
             self.sample_id = sample_id
+            self.sample_ids = sample_ids if sample_ids is not None else ([sample_id] if sample_id is not None else None)
+            self.training_mode = training_mode
 
 
             fold_file_path = _datasets.fetch(f'fold_{fold}.json', progressbar=False)
@@ -135,6 +139,8 @@ class DataConfig:
         """Validate data type parameter."""
         if self.data_type not in ['profile', 'longrange']:
             raise ValueError("Data type must be either 'profile' or 'longrange'")
+        if self.training_mode not in ['standard', 'multi_sample_sequential', 'multi_sample_extended_loss']:
+            raise ValueError("Training mode must be 'standard', 'multi_sample_sequential', or 'multi_sample_extended_loss'")
         
     @classmethod
     def add_argparse_args(cls, parent_parser: ArgumentParser, **kwargs: Any):
