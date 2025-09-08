@@ -91,12 +91,6 @@ def add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument('--force', action='store_true', default=False,
                             help='Force training even if model already exists')
     
-    # Personalized genome arguments
-    parser.add_argument('--vcf_file', type=str, default=None,
-                       help='VCF/BCF file containing variants for personalized genome')
-    parser.add_argument('--sample_id', type=str, default=None,
-                       help='Sample ID to extract genotypes from VCF for personalized genome')
-    
     # Add model-specific arguments
     ChromBPNetConfig.add_argparse_args(parser)
     DataConfig.add_argparse_args(parser)
