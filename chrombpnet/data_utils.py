@@ -260,10 +260,30 @@ def get_seq(peaks_df, genome, width):
     vals = []
 
     for i, r in peaks_df.iterrows():
-        sequence = str(genome[r['chr']][(r['start']+r['summit'] - width//2):(r['start'] + r['summit'] + width//2)])
-        vals.append(sequence)
+        start = r['start'] + r['summit'] - width//2
+        end = r['start'] + r['summit'] + width//2
+        
+        # Check if genome is a PersonalizedGenome instance
+        if hasattr(genome, 'get_sequence_with_haplotypes'):
+            # Use personalized genome with haplotype averaging
+            from .personalized_genome import get_personalized_sequences
+            # For single region, we need to handle it differently
+            first_hap, second_hap = genome.get_sequence_with_haplotypes(r['chr'], start, end)
+            # Average the haplotypes by converting to one-hot and averaging
+            first_onehot = dna_to_one_hot([first_hap])
+            second_onehot = dna_to_one_hot([second_hap])
+            sequence_onehot = (first_onehot + second_onehot) / 2
+            vals.append(sequence_onehot[0])  # Take the first (and only) sequence
+        else:
+            # Use standard genome
+            sequence = str(genome[r['chr']][start:end])
+            vals.append(sequence)
 
-    return dna_to_one_hot(vals)
+    # If we have one-hot encoded sequences, return them directly
+    if vals and hasattr(vals[0], 'shape') and len(vals[0].shape) > 1:
+        return np.array(vals)
+    else:
+        return dna_to_one_hot(vals)
 
 
 def get_cts(peaks_df, bw, width):
@@ -300,7 +320,7 @@ def get_seq_cts_coords(peaks_df, genome, bw, input_width, output_width, peaks_bo
     coords = get_coords(peaks_df, peaks_bool)
     return seq, cts, coords
 
-def load_data(bed_regions, nonpeak_regions, genome_fasta, cts_bw_file, inputlen, outputlen, max_jitter):
+def load_data(bed_regions, nonpeak_regions, genome_fasta, cts_bw_file, inputlen, outputlen, max_jitter, vcf_file=None, sample_id=None):
     """
     Load sequences and corresponding base resolution counts for training, 
     validation regions in peaks and nonpeaks (2 x 2 x 2 = 8 matrices).
@@ -314,7 +334,13 @@ def load_data(bed_regions, nonpeak_regions, genome_fasta, cts_bw_file, inputlen,
     """
 
     cts_bw = pyBigWig.open(cts_bw_file)
-    genome = pyfaidx.Fasta(genome_fasta)
+    
+    # Use personalized genome if VCF file is provided
+    if vcf_file and sample_id:
+        from .personalized_genome import PersonalizedGenome
+        genome = PersonalizedGenome(genome_fasta, vcf_file, sample_id)
+    else:
+        genome = pyfaidx.Fasta(genome_fasta)
 
     train_peaks_seqs=None
     train_peaks_cts=None

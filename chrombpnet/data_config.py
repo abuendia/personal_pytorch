@@ -51,6 +51,8 @@ class DataConfig:
             batch_size: int = 64,
             num_workers: int = 32,
             debug: bool = False,
+            vcf_file: Optional[str] = None,
+            sample_id: Optional[str] = None,
             **kwargs,
         ):
 
@@ -79,6 +81,8 @@ class DataConfig:
             self.batch_size = batch_size    
             self.num_workers = num_workers
             self.debug = debug
+            self.vcf_file = vcf_file
+            self.sample_id = sample_id
 
 
             fold_file_path = _datasets.fetch(f'fold_{fold}.json', progressbar=False)

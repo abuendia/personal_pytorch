@@ -18,6 +18,41 @@ import numpy as np
 import argparse
 
 from .chrombpnet import BPNet, ChromBPNet
+
+
+class BPNetLightningWrapper(L.LightningModule):
+    """A simple Lightning wrapper for BPNet models to enable prediction with Trainer.predict().
+    
+    This wrapper is specifically designed for prediction tasks and doesn't include
+    training/validation logic, making it lightweight for inference-only use cases.
+    """
+    
+    def __init__(self, bpnet_model: BPNet):
+        """Initialize the wrapper with a BPNet model.
+        
+        Args:
+            bpnet_model: The BPNet model to wrap
+        """
+        super().__init__()
+        self.model = bpnet_model
+        
+    def forward(self, x, x_ctl=None):
+        """Forward pass through the BPNet model."""
+        return self.model(x, x_ctl)
+    
+    def predict_step(self, batch, batch_idx):
+        """Prediction step that returns the model outputs in the expected format."""
+        x = batch['onehot_seq']
+        x_ctl = batch.get('control', None)
+        
+        # Get model predictions
+        pred_profile, pred_count = self.forward(x, x_ctl)
+        
+        # Return in the format expected by adjust_bias_model_logcounts
+        return {
+            'pred_count': pred_count,
+            'true_count': batch.get('count', torch.zeros_like(pred_count))
+        }
 from .model_config import ChromBPNetConfig
 
 
@@ -111,19 +146,23 @@ def adjust_bias_model_logcounts(bias_model, dataloader, verbose=False, device=1)
     print("Predicting within adjust counts")
     bias_model.eval()
     with torch.no_grad():
-        output = L.Trainer(logger=False, devices=device).predict(bias_model, dataloader)
+        # Wrap the BPNet model in a Lightning wrapper for prediction
+        lightning_model = BPNetLightningWrapper(bias_model)
+        output = L.Trainer(logger=False, devices=device).predict(lightning_model, dataloader)
         parsed_output = {key: np.concatenate([batch[key] for batch in output]) for key in output[0]}
         try:    
-            delta = parsed_output['true_count'].mean(-1) - parsed_output['pred_count'].mean(-1)
+            # Calculate the mean difference across all samples to get a scalar delta
+            delta = np.mean(parsed_output['true_count']) - np.mean(parsed_output['pred_count'])
         except:
             import pdb; pdb.set_trace()
             # delta = parsed_output['true_count'].mean(dim=-1) - parsed_output['pred_count'].mean(dim=-1)
         # delta = torch.cat([predictions['delta'] for predictions in predictions], dim=0)
 
-        bias_model.linear.bias += torch.Tensor(delta).to(bias_model.linear.bias.device)
+        # Add the scalar delta to the bias parameter
+        bias_model.linear.bias += torch.tensor(delta, dtype=bias_model.linear.bias.dtype, device=bias_model.linear.bias.device)
         
     if verbose:
-        print('### delta', delta.mean(), flush=True)
+        print('### delta', delta, flush=True)
     return bias_model
 
 def init_bias(bias, dataloader=None, verbose=False, device=1):

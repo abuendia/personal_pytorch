@@ -126,6 +126,8 @@ class DataModule(L.LightningDataModule):
                 add_revcomp=True,
                 return_coords=False, #return_coords,
                 shuffle_at_epoch_start=False, #shuffle_at_epoch_start
+                vcf_file=config.vcf_file,
+                sample_id=config.sample_id,
             )
             self.val_dataset = self.dataset_class(
                 peak_regions=val_peaks,
@@ -138,7 +140,9 @@ class DataModule(L.LightningDataModule):
                 cts_bw_file=config.bigwig,
                 add_revcomp=False,
                 return_coords=False,
-                shuffle_at_epoch_start=False, 
+                shuffle_at_epoch_start=False,
+                vcf_file=config.vcf_file,
+                sample_id=config.sample_id,
             )
         elif stage == 'test':
             test_peaks, test_nonpeaks = split_peak_and_nonpeak(self.test_data)
@@ -153,7 +157,9 @@ class DataModule(L.LightningDataModule):
                 cts_bw_file=config.bigwig,
                 add_revcomp=False,
                 return_coords=False,
-                shuffle_at_epoch_start=False, 
+                shuffle_at_epoch_start=False,
+                vcf_file=config.vcf_file,
+                sample_id=config.sample_id,
             )
 
         print(f'Data setup complete in {time() - t0:.2f} seconds')
@@ -212,6 +218,8 @@ class DataModule(L.LightningDataModule):
             add_revcomp=False,
             return_coords=False,
             shuffle_at_epoch_start=False,
+            vcf_file=self.config.vcf_file,
+            sample_id=self.config.sample_id,
         )
         return torch.utils.data.DataLoader(
             self.negative_dataset, 
@@ -258,6 +266,8 @@ class DataModule(L.LightningDataModule):
             return_coords=False,
             shuffle_at_epoch_start=False,
             debug=self.config.debug,
+            vcf_file=self.config.vcf_file,
+            sample_id=self.config.sample_id,
         )
         return dataset
 
@@ -405,6 +415,8 @@ class ChromBPNetDataset(torch.utils.data.Dataset):
             return_coords=False,    
             shuffle_at_epoch_start=False, 
             debug=False,
+            vcf_file=None,
+            sample_id=None,
             **kwargs
     ):
         """Initialize the generator.
@@ -431,7 +443,8 @@ class ChromBPNetDataset(torch.utils.data.Dataset):
  
         # Load data
         peak_seqs, peak_cts, peak_coords, nonpeak_seqs, nonpeak_cts, nonpeak_coords = load_data(
-            peak_regions, nonpeak_regions, genome_fasta, cts_bw_file, inputlen, outputlen, max_jitter
+            peak_regions, nonpeak_regions, genome_fasta, cts_bw_file, inputlen, outputlen, max_jitter,
+            vcf_file=vcf_file, sample_id=sample_id
         )
 
         # Store data
