@@ -11,6 +11,7 @@ import pysam
 from typing import Dict, List, Optional, Tuple
 import pyfaidx
 from tqdm import tqdm
+import os
 
 
 class PersonalizedGenome:
@@ -18,63 +19,70 @@ class PersonalizedGenome:
     A class to handle personalized genomes by applying variants from VCF to reference genome.
     """
     
-    def __init__(self, reference_genome: str, vcf_file: Optional[str] = None, sample_id: Optional[str] = None):
+    def __init__(self, reference_genome: str, vcf_dir: Optional[str] = None, sample_id: Optional[str] = None, rename_map: Optional[str] = None):
         """
         Initialize personalized genome.
         
         Args:
             reference_genome: Path to reference genome fasta file
-            vcf_file: Path to VCF/BCF file containing variants
+            vcf_dir: Path to directory containing VCF/BCF files
             sample_id: Sample ID to extract genotypes from VCF
         """
         self.reference_genome_path = reference_genome
         self.reference_genome = pyfaidx.Fasta(reference_genome)
-        self.vcf_file = vcf_file
         self.sample_id = sample_id
+        self.rename_map = {}
         self.variants_cache = {}
-        
-        if vcf_file and sample_id:
+
+        if rename_map:
+            with open(rename_map, 'r') as f:
+                for line in f:
+                    old_name, new_name = line.strip().split('\t')
+                    self.rename_map[old_name] = new_name
+        self.vcf_file = os.path.join(vcf_dir, self.rename_map.get(self.sample_id, self.sample_id) + '.csv')
+
+        if self.vcf_file and self.sample_id and self.rename_map:
             self._load_variants()
     
     def _load_variants(self):
         """Load variants from VCF file for the specified sample."""
         print(f"Loading variants from {self.vcf_file} for sample {self.sample_id}")
-        
-        with pysam.VariantFile(self.vcf_file, "rb") as vcf:
-            if self.sample_id not in vcf.header.samples:
-                raise ValueError(f"Sample {self.sample_id} not found in VCF file")
+
+        # Load VCF data - CSV with columns like CHROM, POS, REF, ALT, and sample columns
+        vcf_df = pd.read_csv(self.vcf_file)
+                
+        # Process each variant
+        for _, variant in tqdm(vcf_df.iterrows(), total=len(vcf_df), desc="Processing variants"):
+            chrom = variant['CHROM']    
+            pos = variant['POS'] - 1  # Convert to 0-based
+            ref_allele = variant['REF']
+            alt_allele = variant['ALT']
             
-            for record in vcf.fetch():
-                # Get genotype for the sample
-                sample_gt = record.samples[self.sample_id]['GT']
-                if sample_gt is None or sample_gt == (None, None):
-                    continue
-                
-                # Check if ANY allele is alternate (not just the first)
-                has_alt = any(gt is not None and gt > 0 for gt in sample_gt)
-                if not has_alt:
-                    continue
-                    
-                chrom = record.chrom
-                pos = record.pos - 1  # Convert to 0-based
-                ref_allele = record.ref
-                alt_alleles = record.alts
-                
-                # Get all alternate alleles for this sample
-                alt_indices = [gt for gt in sample_gt if gt is not None and gt > 0]
-                
-                # For heterozygous variants, we need to handle both alleles
-                if len(alt_indices) == 1 and len(set(sample_gt)) == 2:
-                    # Heterozygous: 0/1 or 1/0
-                    alt_allele = alt_alleles[alt_indices[0] - 1]
-                    is_heterozygous = True
-                elif len(alt_indices) == 2:
-                    # Homozygous alternate: 1/1
-                    alt_allele = alt_alleles[alt_indices[0] - 1]  # Use first alt allele
-                    is_heterozygous = False
-                else:
-                    continue
-                
+            if len(ref_allele) > 1 or len(alt_allele) > 1:
+                continue
+            
+            # Extract genotype for the sample
+            if self.sample_id and self.sample_id in variant.index:
+                genotype_str = variant[self.sample_id]
+            else:
+                genotype_str = variant.iloc[-1]
+            
+            # Parse genotype (assuming format like "0|1:...")
+            genotype_parts = genotype_str.split(":")[0]
+            if "|" in genotype_parts:
+                first_hap, second_hap = genotype_parts.split("|")
+                first_hap, second_hap = int(first_hap), int(second_hap)
+                genotype = (first_hap, second_hap)
+            elif "/" in genotype_parts:
+                first_hap, second_hap = genotype_parts.split("/")
+                first_hap, second_hap = int(first_hap), int(second_hap)
+                genotype = (first_hap, second_hap)
+            else:
+                # Skip if genotype format is not recognized
+                continue
+            
+            # Only store variants that have alternate alleles
+            if genotype[0] == 1 or genotype[1] == 1:
                 # Store variant information
                 if chrom not in self.variants_cache:
                     self.variants_cache[chrom] = []
@@ -82,8 +90,7 @@ class PersonalizedGenome:
                     'pos': pos,
                     'ref': ref_allele,
                     'alt': alt_allele,
-                    'is_heterozygous': is_heterozygous,
-                    'genotype': sample_gt
+                    'genotype': genotype
                 })
         
         # Sort variants by position for each chromosome
@@ -160,43 +167,56 @@ class PersonalizedGenome:
             Tuple of (haplotype1, haplotype2) DNA sequence strings
         """
         # Get reference sequence
-        ref_seq = str(self.reference_genome[chrom][start:end])
-        
-        if not self.vcf_file or chrom not in self.variants_cache:
-            return ref_seq, ref_seq
-        
-        # Create two haplotypes
-        first_hap_seq = list(ref_seq)
-        second_hap_seq = list(ref_seq)
-        
-        for variant in self.variants_cache[chrom]:
-            var_pos = variant['pos']
-            if start <= var_pos < end:
-                # Adjust position relative to our region
-                rel_pos = var_pos - start
+        sequence = str(self.reference_genome[chrom][start:end])
+        width = end - start
                 
-                # Apply the variant
-                ref_allele = variant['ref']
-                alt_allele = variant['alt']
-                genotype = variant['genotype']
-                
-                # Check if reference allele matches
-                if rel_pos + len(ref_allele) <= len(ref_seq):
-                    region_ref = ref_seq[rel_pos:rel_pos + len(ref_allele)]
-                    if region_ref == ref_allele:
-                        # Apply to first haplotype
-                        if genotype[0] == 1:
-                            if len(alt_allele) == len(ref_allele):
-                                for i, base in enumerate(alt_allele):
-                                    first_hap_seq[rel_pos + i] = base
-                        
-                        # Apply to second haplotype
-                        if genotype[1] == 1:
-                            if len(alt_allele) == len(ref_allele):
-                                for i, base in enumerate(alt_allele):
-                                    second_hap_seq[rel_pos + i] = base
+        # Get variants in the region
+        variants = []
+        if chrom in self.variants_cache:
+            for variant in self.variants_cache[chrom]:
+                pos = variant['pos']
+                if start < pos < end:
+                    variants.append(variant)
         
-        return ''.join(first_hap_seq), ''.join(second_hap_seq)
+        # Initialize haplotypes
+        first_hap_seq = sequence
+        second_hap_seq = sequence
+        
+        # Apply variants
+        for variant in variants:
+            pos = variant['pos']
+            ref = variant['ref']
+            alt = variant['alt']
+            genotype = variant['genotype']
+            
+            # Skip INDELs for now
+            if len(ref) > 1 or len(alt) > 1:
+                continue
+            
+            first_hap, second_hap = genotype[0], genotype[1]
+            
+            # Adjust position relative to our region (0-based within region)
+            rel_pos = pos - start
+            assert rel_pos >= 0, f"Relative position {rel_pos} should be >= 0"
+            assert rel_pos < width, f"Relative position {rel_pos} should be < {width}"
+            
+            # Verify reference allele matches
+            region_ref = sequence[rel_pos:rel_pos + len(ref)]
+            assert region_ref.upper() == ref.upper(), f"Reference mismatch: {region_ref} != {ref}"
+            
+            # Apply variant to first haplotype
+            if first_hap == 1:
+                first_hap_seq = first_hap_seq[:rel_pos] + alt + first_hap_seq[rel_pos + len(ref):]
+            
+            # Apply variant to second haplotype
+            if second_hap == 1:
+                second_hap_seq = second_hap_seq[:rel_pos] + alt + second_hap_seq[rel_pos + len(ref):]
+            
+            # Verify sequence lengths remain correct
+            assert len(first_hap_seq) == width, f"First haplotype length {len(first_hap_seq)} != {width}"
+            assert len(second_hap_seq) == width, f"Second haplotype length {len(second_hap_seq)} != {width}"
+        
+        return first_hap_seq.upper(), second_hap_seq.upper()
     
     def close(self):
         """Close the reference genome."""

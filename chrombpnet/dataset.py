@@ -126,8 +126,9 @@ class DataModule(L.LightningDataModule):
                 add_revcomp=True,
                 return_coords=False, #return_coords,
                 shuffle_at_epoch_start=False, #shuffle_at_epoch_start
-                vcf_file=config.vcf_file,
+                vcf_dir=config.vcf_dir,
                 sample_id=config.sample_id,
+                rename_map=config.rename_map,
             )
             self.val_dataset = self.dataset_class(
                 peak_regions=val_peaks,
@@ -141,8 +142,9 @@ class DataModule(L.LightningDataModule):
                 add_revcomp=False,
                 return_coords=False,
                 shuffle_at_epoch_start=False,
-                vcf_file=config.vcf_file,
+                vcf_dir=config.vcf_dir,
                 sample_id=config.sample_id,
+                rename_map=config.rename_map,
             )
         elif stage == 'test':
             test_peaks, test_nonpeaks = split_peak_and_nonpeak(self.test_data)
@@ -158,8 +160,9 @@ class DataModule(L.LightningDataModule):
                 add_revcomp=False,
                 return_coords=False,
                 shuffle_at_epoch_start=False,
-                vcf_file=config.vcf_file,
+                vcf_dir=config.vcf_dir,
                 sample_id=config.sample_id,
+                rename_map=config.rename_map,
             )
 
         print(f'Data setup complete in {time() - t0:.2f} seconds')
@@ -218,8 +221,9 @@ class DataModule(L.LightningDataModule):
             add_revcomp=False,
             return_coords=False,
             shuffle_at_epoch_start=False,
-            vcf_file=self.config.vcf_file,
+            vcf_dir=self.config.vcf_dir,
             sample_id=self.config.sample_id,
+            rename_map=self.config.rename_map,
         )
         return torch.utils.data.DataLoader(
             self.negative_dataset, 
@@ -266,8 +270,9 @@ class DataModule(L.LightningDataModule):
             return_coords=False,
             shuffle_at_epoch_start=False,
             debug=self.config.debug,
-            vcf_file=self.config.vcf_file,
+            vcf_dir=self.config.vcf_dir,
             sample_id=self.config.sample_id,
+            rename_map=self.config.rename_map,
         )
         return dataset
 
@@ -415,8 +420,9 @@ class ChromBPNetDataset(torch.utils.data.Dataset):
             return_coords=False,    
             shuffle_at_epoch_start=False, 
             debug=False,
-            vcf_file=None,
+            vcf_dir=None,
             sample_id=None,
+            rename_map=None,
             **kwargs
     ):
         """Initialize the generator.
@@ -444,7 +450,7 @@ class ChromBPNetDataset(torch.utils.data.Dataset):
         # Load data
         peak_seqs, peak_cts, peak_coords, nonpeak_seqs, nonpeak_cts, nonpeak_coords = load_data(
             peak_regions, nonpeak_regions, genome_fasta, cts_bw_file, inputlen, outputlen, max_jitter,
-            vcf_file=vcf_file, sample_id=sample_id
+            vcf_dir=vcf_dir, sample_id=sample_id, rename_map=rename_map
         )
 
         # Store data

@@ -320,7 +320,7 @@ def get_seq_cts_coords(peaks_df, genome, bw, input_width, output_width, peaks_bo
     coords = get_coords(peaks_df, peaks_bool)
     return seq, cts, coords
 
-def load_data(bed_regions, nonpeak_regions, genome_fasta, cts_bw_file, inputlen, outputlen, max_jitter, vcf_file=None, sample_id=None):
+def load_data(bed_regions, nonpeak_regions, genome_fasta, cts_bw_file, inputlen, outputlen, max_jitter, vcf_dir=None, sample_id=None, rename_map=None):
     """
     Load sequences and corresponding base resolution counts for training, 
     validation regions in peaks and nonpeaks (2 x 2 x 2 = 8 matrices).
@@ -336,9 +336,9 @@ def load_data(bed_regions, nonpeak_regions, genome_fasta, cts_bw_file, inputlen,
     cts_bw = pyBigWig.open(cts_bw_file)
     
     # Use personalized genome if VCF file is provided
-    if vcf_file and sample_id:
+    if vcf_dir and sample_id:
         from .personalized_genome import PersonalizedGenome
-        genome = PersonalizedGenome(genome_fasta, vcf_file, sample_id)
+        genome = PersonalizedGenome(genome_fasta, vcf_dir, sample_id, rename_map)
     else:
         genome = pyfaidx.Fasta(genome_fasta)
 
