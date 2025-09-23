@@ -49,8 +49,8 @@ class PersonalizedGenome:
         print(f"Loading variants from {self.vcf_file} for sample {self.sample_id}")
 
         # Load VCF data - CSV with columns like CHROM, POS, REF, ALT, and sample columns
-        vcf_df = pd.read_csv(self.vcf_file)
-                
+        vcf_df = pd.read_csv(self.vcf_file, sep='\t')
+        
         # Process each variant
         for _, variant in tqdm(vcf_df.iterrows(), total=len(vcf_df), desc="Processing variants"):
             chrom = variant['CHROM']    
