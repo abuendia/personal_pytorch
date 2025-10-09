@@ -49,23 +49,20 @@ class PersonalizedGenome:
         print(f"Loading variants from {self.vcf_file} for sample {self.sample_id}")
 
         # Load VCF data - CSV with columns like CHROM, POS, REF, ALT, and sample columns
-        vcf_df = pd.read_csv(self.vcf_file, sep='\t')
+        vcf_df = pd.read_csv(self.vcf_file)
+        vcf_df = vcf_df.iloc[:, list(range(5)) + [-1]]
+        vcf_df.columns = ["chrom", "pos", "id", "ref", "alt", "genotype"]
         
         # Process each variant
         for _, variant in tqdm(vcf_df.iterrows(), total=len(vcf_df), desc="Processing variants"):
-            chrom = variant['CHROM']    
-            pos = variant['POS'] - 1  # Convert to 0-based
-            ref_allele = variant['REF']
-            alt_allele = variant['ALT']
+            chrom = str(variant['chrom'])    
+            pos = int(variant['pos']) - 1  # Convert to 0-based
+            ref_allele = variant['ref']
+            alt_allele = variant['alt']
+            genotype_str = str(variant['genotype'])
             
             if len(ref_allele) > 1 or len(alt_allele) > 1:
                 continue
-            
-            # Extract genotype for the sample
-            if self.sample_id and self.sample_id in variant.index:
-                genotype_str = variant[self.sample_id]
-            else:
-                genotype_str = variant.iloc[-1]
             
             # Parse genotype (assuming format like "0|1:...")
             genotype_parts = genotype_str.split(":")[0]
@@ -99,61 +96,6 @@ class PersonalizedGenome:
         
         print(f"Loaded {sum(len(vars) for vars in self.variants_cache.values())} variants")
     
-    def get_sequence(self, chrom: str, start: int, end: int) -> str:
-        """
-        Get personalized sequence for a genomic region.
-        
-        Args:
-            chrom: Chromosome name
-            start: Start position (0-based)
-            end: End position (0-based)
-        
-        Returns:
-            Personalized DNA sequence string
-        """
-        # Get reference sequence
-        ref_seq = str(self.reference_genome[chrom][start:end])
-        
-        if not self.vcf_file or chrom not in self.variants_cache:
-            return ref_seq
-        
-        # Apply variants in the region
-        personalized_seq = list(ref_seq)
-        
-        for variant in self.variants_cache[chrom]:
-            var_pos = variant['pos']
-            if start <= var_pos < end:
-                # Adjust position relative to our region
-                rel_pos = var_pos - start
-                
-                # Apply the variant
-                ref_allele = variant['ref']
-                alt_allele = variant['alt']
-                
-                # Check if reference allele matches
-                if rel_pos + len(ref_allele) <= len(personalized_seq):
-                    region_ref = ''.join(personalized_seq[rel_pos:rel_pos + len(ref_allele)])
-                    if region_ref == ref_allele:
-                        # Replace reference with alternate
-                        if len(alt_allele) == len(ref_allele):
-                            # Simple substitution
-                            for i, base in enumerate(alt_allele):
-                                personalized_seq[rel_pos + i] = base
-                        elif len(alt_allele) > len(ref_allele):
-                            # Insertion
-                            for i, base in enumerate(alt_allele):
-                                if i < len(ref_allele):
-                                    personalized_seq[rel_pos + i] = base
-                                else:
-                                    personalized_seq.insert(rel_pos + len(ref_allele), base)
-                        else:
-                            # Deletion
-                            for i in range(len(ref_allele) - len(alt_allele)):
-                                if rel_pos + len(alt_allele) < len(personalized_seq):
-                                    personalized_seq.pop(rel_pos + len(alt_allele))
-        
-        return ''.join(personalized_seq)
-    
     def get_sequence_with_haplotypes(self, chrom: str, start: int, end: int) -> Tuple[str, str]:
         """
         Get personalized sequence for a genomic region, returning both haplotypes.
@@ -172,6 +114,7 @@ class PersonalizedGenome:
                 
         # Get variants in the region
         variants = []
+        chrom = str(chrom).split("chr")[1]
         if chrom in self.variants_cache:
             for variant in self.variants_cache[chrom]:
                 pos = variant['pos']
