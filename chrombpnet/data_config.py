@@ -40,11 +40,9 @@ class DataConfig:
             rc: float = 0.5,
             outlier_threshold: float = 0.999,
             data_type: str = 'profile',
-            training_chroms: List = [
-                "chr2", "chr4", "chr5", "chr7", "chr9", "chr10", "chr11", "chr12", "chr13", "chr14",
-                "chr15", "chr16", "chr17", "chr18", "chr19", "chr21", "chr22", "chrX", "chrY"],
-            validation_chroms: List = ['chr8', 'chr20'],
-            test_chroms: List = ["chr1", "chr3", "chr6"],
+            training_chroms: List = None,
+            validation_chroms: List = None,
+            test_chroms: List = None,
             exclude_chroms: list = [],
             fold: int = 0,
             genome: str = 'hg38',
@@ -89,9 +87,22 @@ class DataConfig:
 
             fold_file_path = _datasets.fetch(f'fold_{fold}.json', progressbar=False)
             splits_dict = json.load(open(fold_file_path))
-            self.training_chroms = splits_dict['train'] if training_chroms is None else training_chroms
-            self.validation_chroms = splits_dict['valid'] if validation_chroms is None else validation_chroms
-            self.test_chroms = splits_dict['test'] if test_chroms is None else test_chroms
+            
+            # Use fold-specific chromosomes if not explicitly provided, otherwise use provided values
+            if training_chroms is None:
+                self.training_chroms = splits_dict['train']
+            else:
+                self.training_chroms = training_chroms
+                
+            if validation_chroms is None:
+                self.validation_chroms = splits_dict['valid']
+            else:
+                self.validation_chroms = validation_chroms
+                
+            if test_chroms is None:
+                self.test_chroms = splits_dict['test']
+            else:
+                self.test_chroms = test_chroms
 
     
     def __post_init__(self):

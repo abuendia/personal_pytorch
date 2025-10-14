@@ -18,6 +18,7 @@ import numpy as np
 import argparse
 
 from .chrombpnet import BPNet, ChromBPNet
+from .model_config import ChromBPNetConfig
 
 
 class BPNetLightningWrapper(L.LightningModule):
@@ -53,7 +54,6 @@ class BPNetLightningWrapper(L.LightningModule):
             'pred_count': pred_count,
             'true_count': batch.get('count', torch.zeros_like(pred_count))
         }
-from .model_config import ChromBPNetConfig
 
 
 def multinomial_nll(logits, true_counts):
